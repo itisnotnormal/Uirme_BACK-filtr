@@ -53,7 +53,7 @@ const roleMiddleware = (roles) => (req, res, next) => {
 async function getDistrictSchoolIds(user) {
   if (user.role === "district_admin") {
     const schools = await School.find({ city: user.city });
-    return schools.map(s => s._id);
+    return schools.map(s => s._id.toString()); // Return as strings for easy comparison
   }
   return null;
 }
@@ -89,7 +89,7 @@ app.post("/auth/login", async (req, res) => {
 app.post(
   "/auth/register",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     const { email, password, role, school_id, name, city } = req.body;
     try {
@@ -153,7 +153,7 @@ app.post(
 app.put(
   "/users/:id/add-child",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     try {
       const { student_id } = req.body;
@@ -189,7 +189,7 @@ app.put(
 app.put(
   "/users/:id/remove-child",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     try {
       const { student_id } = req.body;
@@ -249,10 +249,10 @@ app.get("/schools", authMiddleware, roleMiddleware(["main_admin", "school_admin"
     if (req.user.role === "school_admin") {
       query = { _id: req.user.school_id };
     } else if (req.user.role === "district_admin") {
-      query = { city: req.user.city };
+      const schoolIds = await getDistrictSchoolIds(req.user);
+      query = { _id: { $in: schoolIds } };
     }
-    const schools = await School.find(query).sort({ created_at: -1 });
-    console.log("Fetched schools:", schools);
+    const schools = await School.find(query).sort({ created_at: -1 }).lean();
     res.json(schools);
   } catch (err) {
     console.error("Error fetching schools:", err.message, err.stack);
@@ -266,7 +266,6 @@ app.post("/schools", authMiddleware, roleMiddleware(["main_admin"]), async (req,
     if (!name || !city) return res.status(400).json({ error: "School name and city required" });
     const school = new School({ name, city, created_at: new Date() });
     await school.save();
-    console.log("School added:", school);
     res.json(school);
   } catch (err) {
     console.error("Error adding school:", err.message, err.stack);
@@ -284,7 +283,6 @@ app.put("/schools/:id", authMiddleware, roleMiddleware(["main_admin"]), async (r
       { new: true }
     );
     if (!school) return res.status(404).json({ error: "School not found" });
-    console.log("School updated:", school);
     res.json(school);
   } catch (err) {
     console.error("Error updating school:", err.message, err.stack);
@@ -296,7 +294,6 @@ app.delete("/schools/:id", authMiddleware, roleMiddleware(["main_admin"]), async
   try {
     const school = await School.findByIdAndDelete(req.params.id);
     if (!school) return res.status(404).json({ error: "School not found" });
-    console.log("School deleted:", school);
     res.json({ success: true });
   } catch (err) {
     console.error("Error deleting school:", err.message, err.stack);
@@ -369,9 +366,17 @@ app.get("/users", authMiddleware, async (req, res) => {
     if (req.user.role === "school_admin") {
       query = { school_id: req.user.school_id };
     } else if (req.user.role === "district_admin") {
-      const schools = await School.find({ city: req.user.city });
-      const schoolIds = schools.map(s => s._id);
-      query = { school_id: { $in: schoolIds } };
+      const schoolIds = await getDistrictSchoolIds(req.user);
+      if (req.query.school_id) {
+        const specificSchool = req.query.school_id.toString();
+        if (schoolIds.includes(specificSchool)) {
+          query = { school_id: specificSchool };
+        } else {
+          return res.status(403).json({ error: "Access denied: School not in your district" });
+        }
+      } else {
+        query = { school_id: { $in: schoolIds } };
+      }
     } else if (req.query.school_id) {
       query = { school_id: req.query.school_id };
     }
@@ -395,7 +400,7 @@ app.get("/users", authMiddleware, async (req, res) => {
 app.delete(
   "/users/:id",
   authMiddleware,
-  roleMiddleware(["main_admin", "school_admin", "district_admin"]),
+  roleMiddleware(["main_admin", "school_admin"]),
   async (req, res) => {
     try {
       const userToDelete = await User.findById(req.params.id);
@@ -410,7 +415,6 @@ app.delete(
       }
       const user = await User.findByIdAndDelete(req.params.id);
       if (!user) return res.status(404).json({ error: "User not found" });
-      console.log("User deleted:", user);
       res.json({ success: true });
     } catch (err) {
       console.error("Error deleting user:", err.message, err.stack);
@@ -419,21 +423,29 @@ app.delete(
   }
 );
 
-// In backend index.js, update the /students GET endpoint to populate email from user_id
+// Students routes
 app.get("/students", authMiddleware, async (req, res) => {
   try {
     let query = {};
     if (req.user.role === "school_admin") {
       query = { school_id: req.user.school_id };
     } else if (req.user.role === "district_admin") {
-      const schools = await School.find({ city: req.user.city });
-      const schoolIds = schools.map(s => s._id);
-      query = { school_id: { $in: schoolIds } };
+      const schoolIds = await getDistrictSchoolIds(req.user);
+      if (req.query.school_id) {
+        const specificSchool = req.query.school_id.toString();
+        if (schoolIds.includes(specificSchool)) {
+          query = { school_id: specificSchool };
+        } else {
+          return res.status(403).json({ error: "Access denied: School not in your district" });
+        }
+      } else {
+        query = { school_id: { $in: schoolIds } };
+      }
     } else if (req.query.school_id) {
       query = { school_id: req.query.school_id };
     }
     const students = await Student.find(query)
-      .populate("user_id", "email password")  // Populate email and password
+      .populate("user_id", "email password")
       .sort({ created_at: -1 });
     res.json(students);
   } catch (err) {
@@ -487,7 +499,7 @@ app.get(
 app.post(
   "/students",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     const { name, group, specialty, email, password, school_id } = req.body;
     try {
@@ -529,7 +541,7 @@ app.post(
 app.put(
   "/students/:id",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     try {
       const student = await Student.findById(req.params.id);
@@ -554,7 +566,7 @@ app.put(
         }
       }
 
-      // Extract password and other other student updates
+      // Extract password and other student updates
       const { password, email, ...studentUpdates } = req.body;
 
       // If email is provided, check for uniqueness in User collection
@@ -563,11 +575,6 @@ app.put(
         if (existingUser && existingUser._id.toString() !== student.user_id.toString()) {
           return res.status(400).json({ error: "Email already exists" });
         }
-      }
-
-      console.log("Received req.body:", req.body);
-      if (password) {
-        console.log("Updating password for user_id:", student.user_id);
       }
 
       // Update associated user if email or password is provided
@@ -595,7 +602,7 @@ app.put(
 app.delete(
   "/students/:id",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     try {
       const student = await Student.findById(req.params.id);
@@ -609,7 +616,6 @@ app.delete(
       }
       await Student.findByIdAndDelete(req.params.id);
       await User.findOneAndDelete({ _id: student.user_id });
-      console.log("Student deleted:", student);
       res.json({ success: true });
     } catch (err) {
       console.error("Error deleting student:", err.message, err.stack);
@@ -628,9 +634,17 @@ app.get("/events", authMiddleware, async (req, res) => {
         query = { ...query, teacher_id: req.user.userId };
       }
     } else if (req.user.role === "district_admin") {
-      const schools = await School.find({ city: req.user.city });
-      const schoolIds = schools.map(s => s._id);
-      query = { school_id: { $in: schoolIds } };
+      const schoolIds = await getDistrictSchoolIds(req.user);
+      if (req.query.school_id) {
+        const specificSchool = req.query.school_id.toString();
+        if (schoolIds.includes(specificSchool)) {
+          query = { school_id: specificSchool };
+        } else {
+          return res.status(403).json({ error: "Access denied: School not in your district" });
+        }
+      } else {
+        query = { school_id: { $in: schoolIds } };
+      }
     } else if (req.query.school_id) {
       query = { school_id: req.query.school_id };
     }
@@ -651,9 +665,19 @@ app.get("/events/active", authMiddleware, async (req, res) => {
         query = { ...query, teacher_id: req.user.userId };
       }
     } else if (req.user.role === "district_admin") {
-      const schools = await School.find({ city: req.user.city });
-      const schoolIds = schools.map(s => s._id);
-      query = { ...query, school_id: { $in: schoolIds } };
+      const schoolIds = await getDistrictSchoolIds(req.user);
+      if (req.query.school_id) {
+        const specificSchool = req.query.school_id.toString();
+        if (schoolIds.includes(specificSchool)) {
+          query = { ...query, school_id: specificSchool };
+        } else {
+          return res.status(403).json({ error: "Access denied: School not in your district" });
+        }
+      } else {
+        query = { ...query, school_id: { $in: schoolIds } };
+      }
+    } else if (req.query.school_id) {
+      query = { ...query, school_id: req.query.school_id };
     }
     const events = await Event.find(query).sort({ created_at: -1 });
     res.json(events);
@@ -666,7 +690,7 @@ app.get("/events/active", authMiddleware, async (req, res) => {
 app.post(
   "/events",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     try {
       const { name, schedule, description, is_active, teacher_id, school_id } = req.body;
@@ -682,7 +706,7 @@ app.post(
       if (!teacher_id) return res.status(400).json({ error: "Teacher ID required" });
       const teacher = await User.findOne({ _id: teacher_id, role: "teacher", school_id });
       if (!teacher) return res.status(400).json({ error: "Invalid teacher: not found or doesn't belong to the school" });
-      const trimmedName = name.trim(); // Trim the name to remove leading/trailing spaces
+      const trimmedName = name.trim();
       const event = new Event({
         name: trimmedName,
         schedule,
@@ -693,7 +717,6 @@ app.post(
         created_at: new Date(),
       });
       await event.save();
-      console.log("Event added:", event);
       res.json(event);
     } catch (err) {
       console.error("Error adding event:", err.message, err.stack);
@@ -705,7 +728,7 @@ app.post(
 app.put(
   "/events/:id",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     try {
       const event = await Event.findById(req.params.id);
@@ -718,7 +741,7 @@ app.put(
         if (school.city !== req.user.city) return res.status(403).json({ error: "Access denied" });
       }
       const { name, schedule, description, is_active, teacher_id } = req.body;
-      const trimmedName = name.trim(); // Trim the name to remove leading/trailing spaces
+      const trimmedName = name.trim();
       let updates = { name: trimmedName, schedule, description, is_active, updated_at: new Date() };
       if (teacher_id) {
         const teacher = await User.findOne({ _id: teacher_id, role: "teacher", school_id: event.school_id });
@@ -726,7 +749,6 @@ app.put(
         updates = { ...updates, teacher_id };
       }
       const updatedEvent = await Event.findByIdAndUpdate(req.params.id, updates, { new: true });
-      console.log("Event updated:", updatedEvent);
       res.json(updatedEvent);
     } catch (err) {
       console.error("Error updating event:", err.message, err.stack);
@@ -738,7 +760,7 @@ app.put(
 app.put(
   "/events/:id/toggle-active",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "teacher", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin", "teacher"]),
   async (req, res) => {
     try {
       const event = await Event.findById(req.params.id);
@@ -756,7 +778,6 @@ app.put(
       const { is_active } = req.body;
       if (is_active === false) {
         const records = await AttendanceRecord.find({ event_name: event.name, school_id: event.school_id });
-        console.log(`Found ${records.length} attendance records for event "${event.name}" in school ${event.school_id}`);
         if (records.length > 0) {
           const archived_at = new Date();
           const historicalData = records.map(record => ({
@@ -768,22 +789,13 @@ app.put(
             studentName: record.studentName,
             archived_at: archived_at
           }));
-          console.log('Historical data prepared:', historicalData);
-          try {
-            const inserted = await HistoricalAttendanceRecord.insertMany(historicalData);
-            console.log(`Copied ${inserted.length} records to HistoricalAttendanceRecord for event "${event.name}"`);
-          } catch (archiveErr) {
-            console.error(`Error copying records to HistoricalAttendanceRecord for event "${event.name}":`, archiveErr.message, archiveErr.stack);
-          }
+          await HistoricalAttendanceRecord.insertMany(historicalData);
           await AttendanceRecord.deleteMany({ event_name: event.name, school_id: event.school_id });
-        } else {
-          console.log(`No records to copy for event "${event.name}"`);
         }
       }
       event.is_active = is_active;
       event.updated_at = new Date();
       await event.save();
-      console.log("Event active status toggled:", event);
       res.json({ success: true });
     } catch (err) {
       console.error("Error toggling event active status:", err.message, err.stack);
@@ -795,7 +807,7 @@ app.put(
 app.delete(
   "/events/:id",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     try {
       const event = await Event.findById(req.params.id);
@@ -809,7 +821,6 @@ app.delete(
       }
       await Event.findByIdAndDelete(req.params.id);
       await AttendanceRecord.deleteMany({ event_name: event.name, school_id: event.school_id });
-      console.log(`Event deleted: ${event.name}, attendance records cleared for school ${event.school_id}`);
       res.json({ success: true });
     } catch (err) {
       console.error("Error deleting event:", err.message, err.stack);
@@ -818,6 +829,28 @@ app.delete(
   }
 );
 
+// Get events by teacher
+app.get("/events/teacher/:teacherId", authMiddleware, roleMiddleware(["teacher", "school_admin", "main_admin"]), async (req, res) => {
+  try {
+    const { teacherId } = req.params;
+    if (req.user.role === "teacher" && req.user.userId !== teacherId) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+    let schoolFilter = {};
+    if (req.user.role === "school_admin") {
+      schoolFilter = { school_id: req.user.school_id };
+    } else if (req.user.role === "district_admin") {
+      const schoolIds = await getDistrictSchoolIds(req.user);
+      schoolFilter = { school_id: { $in: schoolIds } };
+    }
+    const events = await Event.find({ ...schoolFilter, teacher_id: teacherId }).lean();
+    res.json(events);
+  } catch (err) {
+    console.error("Error fetching events for teacher:", err.message, err.stack);
+    res.status(500).json({ error: "Error fetching events", details: err.message });
+  }
+});
+
 // Attendance routes
 app.get("/attendance", authMiddleware, async (req, res) => {
   try {
@@ -825,9 +858,17 @@ app.get("/attendance", authMiddleware, async (req, res) => {
     if (req.user.role === "school_admin") {
       query = { school_id: req.user.school_id };
     } else if (req.user.role === "district_admin") {
-      const schools = await School.find({ city: req.user.city });
-      const schoolIds = schools.map(s => s._id);
-      query = { school_id: { $in: schoolIds } };
+      const schoolIds = await getDistrictSchoolIds(req.user);
+      if (req.query.school_id) {
+        const specificSchool = req.query.school_id.toString();
+        if (schoolIds.includes(specificSchool)) {
+          query = { school_id: specificSchool };
+        } else {
+          return res.status(403).json({ error: "Access denied: School not in your district" });
+        }
+      } else {
+        query = { school_id: { $in: schoolIds } };
+      }
     } else if (req.query.school_id) {
       query = { school_id: req.query.school_id };
     }
@@ -845,7 +886,7 @@ app.get("/attendance", authMiddleware, async (req, res) => {
       .populate({
         path: "student_id",
         select: "name group specialty school_id",
-        options: { strictPopulate: false } // Игнорировать ошибки populate
+        options: { strictPopulate: false }
       })
       .lean();
     const historicalRecords = await HistoricalAttendanceRecord.find(query)
@@ -856,7 +897,7 @@ app.get("/attendance", authMiddleware, async (req, res) => {
       })
       .lean();
     let allRecords = [...currentRecords, ...historicalRecords];
-    allRecords = allRecords.filter(record => record.student_id); // Фильтровать записи без student_id
+    allRecords = allRecords.filter(record => record.student_id);
     allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
     res.json(
       allRecords.map((record) => ({
@@ -885,12 +926,10 @@ app.get(
   async (req, res) => {
     try {
       const eventName = req.params.eventName.trim();
-      console.log("Fetching attendance for eventName:", eventName);
       let eventQuery = { name: eventName };
       if (req.user.role !== "main_admin") {
         if (req.user.role === "district_admin") {
-          const schools = await School.find({ city: req.user.city });
-          const schoolIds = schools.map(s => s._id);
+          const schoolIds = await getDistrictSchoolIds(req.user);
           eventQuery = { ...eventQuery, school_id: { $in: schoolIds } };
         } else {
           eventQuery = { ...eventQuery, school_id: req.user.school_id };
@@ -901,8 +940,6 @@ app.get(
       const event = await Event.findOne(eventQuery).collation({ locale: "ru", strength: 2 });
       if (!event) return res.status(404).json({ error: "Event not found" });
 
-
-      // Access checks
       if (req.user.role === "school_admin" && event.school_id.toString() !== req.user.school_id) {
         return res.status(403).json({ error: "Access denied" });
       }
@@ -919,15 +956,8 @@ app.get(
         .populate("student_id", "name")
         .sort({ timestamp: -1 });
 
-      records.forEach((record, index) => {
-        if (!record.student_id) {
-          console.warn(`Record ${index} has null student_id:`, record);
-        }
-      });
-
-      // Filter out records with null student_id and map valid ones
       const filteredRecords = records
-        .filter((record) => record.student_id != null) // Ensure student_id exists
+        .filter((record) => record.student_id != null)
         .map((record) => ({
           _id: record._id,
           student_id: record.student_id._id,
@@ -1043,13 +1073,11 @@ app.get(
 app.post(
   "/attendance",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "teacher", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin", "teacher"]),
   async (req, res) => {
     try {
       const { student_id, event_name, timestamp, scanned_by } = req.body;
       const trimmedEventName = event_name.trim();
-      console.log("Received attendance data:", { student_id, event_name: trimmedEventName, timestamp, scanned_by });
-
       let eventQuery = { name: trimmedEventName };
       if (req.user.role !== "main_admin") {
         if (req.user.role === "district_admin") {
@@ -1062,34 +1090,26 @@ app.post(
       }
       const event = await Event.findOne(eventQuery);
       if (!event) {
-        console.error(`Event "${trimmedEventName}" not found`);
         return res.status(404).json({ error: "Event not found" });
       }
 
       if (req.user.role === "school_admin" && event.school_id.toString() !== req.user.school_id) {
-        console.error(`Access denied: school_id mismatch (event: ${event.school_id}, user: ${req.user.school_id})`);
         return res.status(403).json({ error: "Access denied" });
       }
       if (req.user.role === "district_admin") {
         const school = await School.findById(event.school_id);
-        if (school.city !== req.user.city) {
-          console.error(`Access denied: city mismatch`);
-          return res.status(403).json({ error: "Access denied" });
-        }
+        if (school.city !== req.user.city) return res.status(403).json({ error: "Access denied" });
       }
       if (req.user.role === "teacher" && event.teacher_id.toString() !== req.user.userId) {
-        console.error(`Access denied: teacher_id mismatch (event: ${event.teacher_id}, user: ${req.user.userId})`);
         return res.status(403).json({ error: "Access denied" });
       }
 
       const student = await Student.findById(student_id);
       if (!student) {
-        console.error(`Student "${student_id}" not found`);
         return res.status(404).json({ error: "Student not found" });
       }
 
       if (req.user.role === "school_admin" && student.school_id.toString() !== req.user.school_id) {
-        console.error(`Access denied: student school_id mismatch (student: ${student.school_id}, user: ${req.user.school_id})`);
         return res.status(403).json({ error: "Access denied" });
       }
       if (req.user.role === "district_admin") {
@@ -1103,7 +1123,6 @@ app.post(
         school_id: event.school_id,
       });
       if (existingRecord) {
-        console.error(`Attendance already recorded for student "${student_id}" and event "${trimmedEventName}" in school "${event.school_id}"`);
         return res.status(400).json({ error: "Attendance already recorded" });
       }
 
@@ -1116,9 +1135,7 @@ app.post(
         studentName: student.name,
       });
       await record.save();
-      console.log("Saved attendance record:", record);
 
-      // Save to HistoricalAttendanceRecord
       const historicalRecord = new HistoricalAttendanceRecord({
         student_id,
         event_name: trimmedEventName,
@@ -1129,7 +1146,6 @@ app.post(
         archived_at: new Date(),
       });
       await historicalRecord.save();
-      console.log("Saved historical attendance record:", historicalRecord);
 
       const populatedRecord = await AttendanceRecord.findById(record._id).populate(
         "student_id",
@@ -1153,7 +1169,7 @@ app.post(
 app.delete(
   "/attendance/:id",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "teacher", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin", "teacher"]),
   async (req, res) => {
     try {
       const record = await AttendanceRecord.findById(req.params.id);
@@ -1166,7 +1182,6 @@ app.delete(
         if (school.city !== req.user.city) return res.status(403).json({ error: "Access denied" });
       }
       await AttendanceRecord.findByIdAndDelete(req.params.id);
-      console.log("Attendance record deleted:", record);
       res.json({ success: true });
     } catch (err) {
       console.error("Error deleting attendance:", err.message, err.stack);
@@ -1178,7 +1193,7 @@ app.delete(
 app.delete(
   "/attendance/event/:eventName/delete-all",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "teacher", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin", "teacher"]),
   async (req, res) => {
     try {
       const eventName = req.params.eventName;
@@ -1208,7 +1223,6 @@ app.delete(
         return res.status(403).json({ error: "Access denied" });
       }
       await AttendanceRecord.deleteMany({ event_name: eventName, school_id: event.school_id });
-      console.log(`All attendance records for event ${eventName} deleted in school ${event.school_id}`);
       res.json({ success: true });
     } catch (err) {
       console.error("Error deleting all attendance by event:", err.message, err.stack);
@@ -1240,7 +1254,23 @@ app.get("/analytics", authMiddleware, roleMiddleware(["main_admin", "school_admi
       students: await User.countDocuments({ ...schoolFilter, role: "student" }),
       schoolAdmins: await User.find({ ...schoolFilter, role: "school_admin" })
         .populate("school_id", "name")
-        .select("email school_id"),
+        .select("email school_id")
+        .then(admins => {
+          // Filter out school admins with null school_id and log them
+          const validAdmins = admins.filter(admin => {
+            if (!admin.school_id) {
+              console.warn(`School admin ${admin.email} has no school_id assigned`);
+              return false;
+            }
+            return true;
+          });
+          return validAdmins.map(admin => ({
+            _id: admin._id,
+            email: admin.email,
+            school_id: admin.school_id._id,
+            school: admin.school_id.name // Ensure school name is included
+          }));
+        }),
       mainAdmins: (req.user.role === 'main_admin') ? await User.countDocuments({ role: "main_admin" }) : 0,
       districtAdmins: (req.user.role === 'main_admin') ? await User.countDocuments({ role: "district_admin" }) : 0,
     };
@@ -1287,6 +1317,7 @@ app.get("/analytics", authMiddleware, roleMiddleware(["main_admin", "school_admi
     res.status(500).json({ error: "Error fetching analytics", details: err.message });
   }
 });
+
 // Get current user
 app.get("/auth/me", authMiddleware, async (req, res) => {
   try {
@@ -1304,7 +1335,7 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
 app.put(
   "/users/:id",
   authMiddleware,
-  roleMiddleware(["school_admin", "main_admin", "district_admin"]),
+  roleMiddleware(["school_admin", "main_admin"]),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -1352,7 +1383,6 @@ app.put(
     }
   }
 );
-
 
 // Start server
 const PORT = process.env.PORT || 5000;
