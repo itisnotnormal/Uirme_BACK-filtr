@@ -3,7 +3,6 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const morgan = require("morgan");
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { v4: uuidv4 } = require("uuid");
 const Student = require("./models/Student");
@@ -66,11 +65,7 @@ app.post("/auth/login", async (req, res) => {
     if (!user) return res.status(400).json({ error: "Invalid credentials" });
 
     let isMatch;
-    if (['main_admin', 'school_admin', 'district_admin'].includes(role)) {
-      isMatch = await bcrypt.compare(password, user.password);
-    } else {
-      isMatch = password === user.password;
-    }
+    isMatch = password === user.password;
     if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
 
     const token = jwt.sign(
@@ -99,10 +94,6 @@ app.post(
       if (existingUser) return res.status(400).json({ error: "User already exists" });
 
       let hashedPassword = password;
-      if (['main_admin', 'school_admin', 'district_admin'].includes(role)) {
-        const salt = await bcrypt.genSalt(10);
-        hashedPassword = await bcrypt.hash(password, salt);
-      }
 
       const user = new User({
         email,
@@ -126,8 +117,7 @@ app.post(
   const demoEmail = "admin@education.gov";
   const existingUser = await User.findOne({ email: demoEmail });
   if (!existingUser) {
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash("admin123", salt);
+    const hashedPassword = "admin123";
     const demoUser = new User({ email: demoEmail, password: hashedPassword, role: "main_admin" });
     await demoUser.save();
     console.log("Demo main_admin user created");
@@ -141,8 +131,7 @@ app.post(
   const demoDistrictEmail = "district@education.gov";
   const existingDistrict = await User.findOne({ email: demoDistrictEmail });
   if (!existingDistrict) {
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash("district123", salt);
+    const hashedPassword = "district123";
     const demoDistrict = new User({ email: demoDistrictEmail, password: hashedPassword, role: "district_admin", city: "Demo City", name: "Demo District Admin" });
     await demoDistrict.save();
     console.log("Demo district_admin user created");
@@ -1359,12 +1348,7 @@ app.put(
       if (name) updateData.name = name;
       if (city) updateData.city = city;
       if (password) {
-        if (['main_admin', 'school_admin', 'district_admin'].includes(userToUpdate.role)) {
-          const salt = await bcrypt.genSalt(10);
-          updateData.password = await bcrypt.hash(password, salt);
-        } else {
-          updateData.password = password;
-        }
+        updateData.password = password;
       }
 
       const updatedUser = await User.findByIdAndUpdate(id, updateData, { new: true });
