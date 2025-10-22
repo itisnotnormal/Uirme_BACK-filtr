@@ -89,6 +89,7 @@ app.post(
     const { email, password, role, school_id, name, city } = req.body;
     try {
       if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+      if (role === "district_admin" && !city) return res.status(400).json({ error: "City required for district_admin" });
 
       let existingUser = await User.findOne({ email });
       if (existingUser) return res.status(400).json({ error: "User already exists" });
@@ -239,12 +240,28 @@ app.get("/schools", authMiddleware, roleMiddleware(["main_admin", "school_admin"
       query = { _id: req.user.school_id };
     } else if (req.user.role === "district_admin") {
       const schoolIds = await getDistrictSchoolIds(req.user);
+      if (schoolIds.length === 0) {
+        console.warn(`No schools found for district_admin: ${req.user.userId}, city: ${req.user.city}`);
+        return res.json([]);
+      }
       query = { _id: { $in: schoolIds } };
+      // Ignore req.query.city for district_admin to prevent conflicts
+      if (req.query.city && req.query.city !== req.user.city && req.query.city !== "all") {
+        console.warn(`District admin attempted to filter by unauthorized city: ${req.query.city}`);
+        return res.status(403).json({ error: "Access denied: Cannot filter by different city" });
+      }
+    } else if (req.query.city && req.query.city !== "all") {
+      query.city = req.query.city;
     }
+    if (req.query.search) {
+      query.name = { $regex: req.query.search.trim(), $options: 'i' };
+    }
+    console.log(`Fetching schools with query: ${JSON.stringify(query)}`);
     const schools = await School.find(query).sort({ created_at: -1 }).lean();
+    console.log(`Found ${schools.length} schools for user: ${req.user.userId}, role: ${req.user.role}`);
     res.json(schools);
   } catch (err) {
-    console.error("Error fetching schools:", err.message, err.stack);
+    console.error(`Error fetching schools for user: ${req.user.userId}, error: ${err.message}`, err.stack);
     res.status(500).json({ error: "Error fetching schools", details: err.message });
   }
 });
@@ -861,16 +878,33 @@ app.get("/attendance", authMiddleware, async (req, res) => {
     } else if (req.query.school_id) {
       query = { school_id: req.query.school_id };
     }
+
+    // Add city filter if provided and not "all"
+    if (req.query.city && req.query.city !== "all") {
+      const schools = await School.find({ city: req.query.city }).select('_id').lean();
+      const schoolIds = schools.map(s => s._id.toString());
+      if (schoolIds.length === 0) {
+        console.warn(`No schools found for city: ${req.query.city}`);
+        return res.json([]);
+      }
+      query.school_id = { $in: schoolIds };
+    }
+
+    // Apply period filter
     const period = req.query.period;
     if (period) {
       const now = new Date();
       let startDate;
-      if (period === 'week') startDate = new Date(now - 7 * 24 * 60 * 60 * 1000);
-      else if (period === 'month') startDate = new Date(now - 30 * 24 * 60 * 60 * 1000);
-      else if (period === 'year') startDate = new Date(now - 365 * 24 * 60 * 60 * 1000);
+      if (period === "week") startDate = new Date(now - 7 * 24 * 60 * 60 * 1000);
+      else if (period === "month") startDate = new Date(now - 30 * 24 * 60 * 60 * 1000);
+      else if (period === "year") startDate = new Date(now - 365 * 24 * 60 * 60 * 1000);
       else startDate = new Date(0);
       query.timestamp = { $gte: startDate };
     }
+
+    console.log(`Fetching attendance with query: ${JSON.stringify(query)}`);
+
+    // Fetch current and historical records
     const currentRecords = await AttendanceRecord.find(query)
       .populate({
         path: "student_id",
@@ -885,25 +919,33 @@ app.get("/attendance", authMiddleware, async (req, res) => {
         options: { strictPopulate: false }
       })
       .lean();
+
+    console.log(`Found ${currentRecords.length} current records, ${historicalRecords.length} historical records`);
+
+    // Combine and filter records
     let allRecords = [...currentRecords, ...historicalRecords];
-    allRecords = allRecords.filter(record => record.student_id);
+    allRecords = allRecords.filter(record => record.student_id && record.timestamp); // Ensure student_id and timestamp exist
     allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-    res.json(
-      allRecords.map((record) => ({
-        _id: record._id,
-        student_id: record.student_id._id,
-        studentName: record.student_id?.name || "Неизвестно",
-        group: record.student_id?.group || "",
-        specialty: record.student_id?.specialty || "",
-        event_name: record.event_name,
-        timestamp: record.timestamp,
-        scanned_by: record.scanned_by,
-        school_id: record.school_id,
-        location: record.location,
-      }))
-    );
+
+    console.log(`Total records after filtering: ${allRecords.length}`);
+
+    // Map records to response format
+    const response = allRecords.map((record) => ({
+      _id: record._id,
+      student_id: record.student_id._id,
+      studentName: record.student_id?.name || "Неизвестно",
+      group: record.student_id?.group || "",
+      specialty: record.student_id?.specialty || "",
+      event_name: record.event_name,
+      timestamp: record.timestamp,
+      scanned_by: record.scanned_by,
+      school_id: record.school_id,
+      location: record.location,
+    }));
+
+    res.json(response);
   } catch (err) {
-    console.error("Error fetching attendance:", err.message, err.stack);
+    console.error(`Error fetching attendance for user: ${req.user.userId}, error: ${err.message}`, err.stack);
     res.status(500).json({ error: "Error fetching attendance", details: err.message });
   }
 });
