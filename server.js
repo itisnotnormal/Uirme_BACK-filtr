@@ -782,6 +782,33 @@ app.put(
         return res.status(403).json({ error: "Access denied" });
       }
       const { is_active } = req.body;
+      if (is_active === true) { // Проверяем на пересечения перед активацией
+        // Найти другие активные события этого преподавателя
+        const otherActiveEvents = await Event.find({
+          teacher_id: event.teacher_id,
+          is_active: true,
+          _id: { $ne: event._id },
+          school_id: event.school_id,
+        });
+        let hasOverlap = false;
+        for (const sched of event.schedule) {
+          for (const activeEvent of otherActiveEvents) {
+            for (const activeSched of activeEvent.schedule) {
+              if (sched.dayOfWeek === activeSched.dayOfWeek) {
+                if (sched.startTime < activeSched.endTime && activeSched.startTime < sched.endTime) {
+                  hasOverlap = true;
+                  break;
+                }
+              }
+            }
+            if (hasOverlap) break;
+          }
+          if (hasOverlap) break;
+        }
+        if (hasOverlap) {
+          return res.status(400).json({ error: "Нельзя активировать два мероприятия в одно и то же время для одного преподавателя" });
+        }
+      }
       if (is_active === false) {
         const records = await AttendanceRecord.find({ event_name: event.name, school_id: event.school_id });
         if (records.length > 0) {
