@@ -12,4 +12,4 @@ const attendanceSchema = new mongoose.Schema({
 // Unique index including school_id to prevent cross-school duplicates
 attendanceSchema.index({ student_id: 1, event_name: 1, school_id: 1 }, { unique: true });
 
-module.exports = mongoose.model('AttendanceRecord', attendanceSchema);
+module.exports = mongoose.model('AttendanceRecord', attendanceSchema) 

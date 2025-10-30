@@ -355,7 +355,7 @@ app.put("/schools/:id/assign", authMiddleware, roleMiddleware(["main_admin"]), a
 });
 
 // Cities route for unique cities
-app.get("/cities", authMiddleware, roleMiddleware(["main_admin"]), async (req, res) => {
+app.get("/cities", authMiddleware, roleMiddleware(["main_admin", "district_admin"]), async (req, res) => {
   try {
     const cities = await School.distinct("city");
     res.json(cities.filter(c => c).sort());
@@ -386,9 +386,7 @@ app.get("/users", authMiddleware, async (req, res) => {
     } else if (req.query.school_id) {
       query = { school_id: req.query.school_id };
     }
-    if (req.user.role === "district_admin" && req.query.role === "district_admin") {
-      return res.status(403).json({ error: "Access denied" });
-    }
+   
     if (req.query.role) {
       query.role = req.query.role;
     }
@@ -1065,20 +1063,92 @@ app.get(
       const historicalRecords = await HistoricalAttendanceRecord.find({ student_id: studentId }).populate("student_id", "name");
       let allRecords = [...currentRecords, ...historicalRecords];
       allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-      res.json(
-        allRecords.map((record) => ({
-          _id: record._id,
-          student_id: record.student_id._id,
-          studentName: record.student_id.name,
-          event_name: record.event_name,
-          timestamp: record.timestamp,
-          scanned_by: record.scanned_by,
-        }))
+
+      // Добавляем данные о мероприятии (event)
+      const response = await Promise.all(
+        allRecords.map(async (record) => {
+          const event = await Event.findOne({ name: record.event_name, school_id: student.school_id }).populate("teacher_id", "name");
+          return {
+            _id: record._id,
+            student_id: record.student_id._id,
+            studentName: record.student_id.name,
+            event_name: record.event_name,
+            timestamp: record.timestamp,
+            scanned_by: record.scanned_by,
+            teacher_name: event ? event.teacher_id?.name || "Unknown" : "Unknown",
+            schedule: event ? event.schedule : [],
+            description: event ? event.description : "",
+            is_active: event ? event.is_active : false,
+          };
+        })
       );
+
+      res.json(response);
     } catch (err) {
       console.error("Error fetching attendance by student:", err.message, err.stack);
       res.status(500).json({
         error: "Error fetching attendance by student",
+        details: err.message,
+      });
+    }
+  }
+);
+
+app.get(
+  "/attendance/current/student/:studentId",
+  authMiddleware,
+  roleMiddleware(["school_admin", "main_admin", "parent", "student", "district_admin"]),
+  async (req, res) => {
+    try {
+      const studentId = req.params.studentId;
+      const student = await Student.findById(studentId);
+      if (!student) return res.status(404).json({ error: "Student not found" });
+      if (
+        req.user.role === "school_admin" ||
+        req.user.role === "teacher" ||
+        req.user.role === "parent"
+      ) {
+        if (student.school_id.toString() !== req.user.school_id) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+      }
+      if (req.user.role === "district_admin") {
+        const school = await School.findById(student.school_id);
+        if (school.city !== req.user.city) return res.status(403).json({ error: "Access denied" });
+      }
+      if (req.user.role === "parent") {
+        const user = await User.findById(req.user.userId);
+        if (!user.children.includes(studentId)) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+      }
+      const currentRecords = await AttendanceRecord.find({ student_id: studentId }).populate("student_id", "name");
+      currentRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+      // Добавляем данные о мероприятии (event)
+      const response = await Promise.all(
+        currentRecords.map(async (record) => {
+          const event = await Event.findOne({ name: record.event_name, school_id: student.school_id }).populate("teacher_id", "name");
+          return {
+            _id: record._id,
+            student_id: record.student_id._id,
+            studentName: record.student_id.name,
+            event_name: record.event_name,
+            timestamp: record.timestamp,
+            scanned_by: record.scanned_by,
+            teacher_name: event ? event.teacher_id?.name || "Unknown" : "Unknown",
+            schedule: event ? event.schedule : [],
+            description: event ? event.description : "",
+            is_active: event ? event.is_active : false,
+          };
+        })
+      );
+
+      res.json(response);
+    } catch (err) {
+      console.error("Error fetching current attendance by student:", err.message, err.stack);
+      res.status(500).json({
+        error: "Error fetching current attendance by student",
         details: err.message,
       });
     }
